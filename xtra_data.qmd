@@ -1,0 +1,27 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+
+
+```{r}
+object <- data.frame(Sample = c("SRR11647685", "SRR11647687", "SRR11647689", "SRR11647695", "SRR11647697", "SRR11647699"), Type = c("Normal", "Normal", "Normal", "Tumor","Tumor","Tumor"), Mapping_Rate = c("96.11", "96.97", "96.54", "95.93", "94.86", "96.89"))
+
+ggplot(object, aes(x=Sample, y=Mapping_Rate, fill=Type)) +
+  geom_bar(stat = "identity")+
+  labs(title = "Mapping Rate",
+       x = "Sample",
+       y = "Mapping rate (%)")
+
+
+
+```
+
+
+
+```{r}
+
+```
+
