@@ -1,0 +1,568 @@
+---
+title: "HW_1"
+format: html
+editor: visual
+---
+
+Used libraries
+
+```{r}
+library(scales)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+library(data.table)
+library(DESeq2)
+library(apeglm)
+library(tibble)
+library(ggfortify)
+library(pheatmap)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(msigdbr)
+library(biomaRt)
+library(enrichplot)
+library(ggridges)
+```
+Loading Data
+
+
+```{r}
+counts_raw <- read.delim("C:/Users/pauli/Downloads/count_table.txt",
+skip = 1)
+
+counts_raw$Geneid <- gsub("\\..*$", "", counts_raw$Geneid)
+dim(counts_raw)
+
+colnames(counts_raw) <- c("Geneid",	"Chr",	"Start",	"End",	"Strand",
+  "Length",	"SRR11647685",	"SRR11647687",	"SRR11647689",
+  "SRR11647695",	"SRR11647697",	"SRR11647699")
+
+colnames(counts_raw)
+head(counts_raw)
+
+```
+
+\`
+
+```{r}
+meta <- read.table(
+  "C:/Users/pauli/Downloads/sampleInfo.txt",
+  header = TRUE,
+  sep = " "
+)
+print(meta)
+```
+
+```{r}
+gene <- read.table(
+  "C:/Users/pauli/Downloads/gene_id_type.tsv",
+  header = TRUE
+)
+colnames(gene) <- c("Geneid",	"Gene_Type")
+colnames(gene)
+dplyr::count(gene, Gene_Type)
+
+
+gene$Geneid <- substr(gene$Geneid, 1 ,15)
+head(gene)
+
+
+gene_filter <- gene %>% filter(Gene_Type == 'protein_coding')
+
+head(gene_filter)
+dim(gene_filter)
+
+```
+
+```{r}
+counts_filter <- counts_raw %>% dplyr::select(-2, -3, -4, -5, -6)
+head(counts_filter)
+
+```
+
+
+```{r}
+counts_gene <- left_join(gene_filter, counts_filter, by = "Geneid")
+counts_gene <- counts_gene  %>% dplyr::select(-2)
+
+sum(is.na(counts_gene))
+dim(counts_gene)
+```
+
+```{r}
+
+num_gene <- colSums(counts_gene[-1])
+meta$Counts <- num_gene
+```
+
+Library Size Exploration
+
+```{r}
+
+ggplot(meta, aes(x=Sample, y=Counts, fill=Type)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = label_number(scale = 1e-6)) +
+  labs(title = "Lybrary Sizes per Sample",
+       subtitle = "Total Mapped Reads (raw counts, protein-coding genes",
+       x = "Sample",
+       y = "Counts (in Millions)")
+
+```
+
+
+Counting Distribution
+
+```{r}
+meta$log2n <- log2(meta$Counts+1)
+summary(count_log)
+
+meta$median <- log2 (c(202, 261, 250, 263, 197, 227)+1)
+meta$Q1 <- log2(c(8, 14, 12, 10, 6, 6)+1)
+meta$Q3 <- log2(c(738, 985, 908, 991, 799, 920)+1)
+
+ggplot(meta, aes(x=Sample, y=log2n, fill=Type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribution of log2(counts + 1) per Sample",
+       x = "Sample",
+       y = "log2(counts + 1)")+
+  
+
+  geom_pointrange(aes(y = median,
+                      ymin = Q1,
+                      ymax = Q3),
+                  show.legend = FALSE) +
+  labs(       subtitle = 'Median and interquartile range',
+       )
+```
+
+Subset to Normal vs Tumor
+```{r}
+samples_of_interest <- meta %>%
+  filter(Type %in% c("Normal", "Tumor"))
+
+print(samples_of_interest[, c("Sample", "Type", "Counts")])
+
+counts_subset <- counts_gene[, samples_of_interest$Sample]
+cat("\nDimensions of subset count matrix:", dim(counts_subset), "\n")
+```
+
+Building the DESeqDataSet
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_subset,
+  colData   = samples_of_interest,
+  design    = ~ Type
+)
+
+dds$Type <- relevel(dds$Type, ref = "Tumor")
+```
+
+```{r}
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+cat("Genes remaining after low-count filter:", nrow(dds), "\n")
+
+```
+Running DESeq2
+
+```{r}
+dds <- DESeq(dds)
+
+
+res <- results(dds,
+               contrast = c("Type", "Normal", "Tumor"),
+               alpha = 0.05)  
+
+summary(res)
+
+```
+
+Applying Log2FC Shrinkage
+
+```{r}
+res_shrunk <- lfcShrink(dds,
+                        coef = "Type_Normal_vs_Tumor",
+                        type = "apeglm")
+
+summary(res_shrunk)
+
+```
+
+Converting Results to a Data Frame
+
+```{r}
+
+res_df <- res_shrunk %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  arrange(padj) %>%
+  mutate(
+    significance = case_when(
+      padj < 0.05 & log2FoldChange >  1 ~ "Up",
+      padj < 0.05 & log2FoldChange < -1 ~ "Down",
+      TRUE ~ "NS"  # Not Significant
+    ),
+    significance = factor(significance, levels = c("Up", "Down", "NS"))
+  )
+
+
+table(res_df$significance)
+
+```
+
+
+
+```{r}
+
+res_df %>% filter(significance == "Up") %>% head(10) %>%
+  dplyr::select(gene, log2FoldChange, padj) %>% print()
+
+```
+
+VST
+
+```{r}
+counts_gene_1 <- counts_gene[,-1]
+
+dds_all <- DESeqDataSetFromMatrix(
+  countData = counts_gene_1[rowSums(counts_gene_1) >= 10, ],
+  colData   = meta %>% column_to_rownames("Sample"),
+  design    = ~ Type)
+
+
+vst_all <- vst(dds_all, blind = TRUE)
+
+```
+
+PCA Plot
+
+```{r}
+
+vst_pca <- prcomp(vst_all$Counts,
+                   scale=TRUE)
+vst_pca$Type <-  vst_all$Type
+PC <- as.data.frame(vst_pca$x)
+
+PC$Type <- vst_all$Type
+
+row.names(PC) <- c("SRR11647685", "SRR11647687", "SRR11647689", "SRR11647695", "SRR11647697", "SRR11647699")
+head(PC)
+summary(PC)
+
+
+
+```
+
+```{r}
+
+ggplot(PC, aes(x=Type, y=PC1)) +
+  geom_point()+
+  geom_text(
+    label=rownames(PC), 
+    nudge_x = 0.2, nudge_y = 0.05, 
+    check_overlap = F
+  )+
+  ggtitle("PCA of VST- normalized counts")
+
+
+```
+
+Sample-to-Sample Correlation Heatmap
+
+```{r}
+
+vst_mat <- assay(vst_all)
+cor_mat  <- cor(vst_mat, method = "pearson")
+
+
+anno_df <- meta %>%
+  column_to_rownames("Sample") %>%
+  dplyr::select(Type)
+
+
+anno_colors <- list(
+  Type = c(
+    Tumor                 = "#96C",
+    Normal                 = "#16A"
+  )
+)
+
+
+pheatmap(
+  cor_mat,
+  annotation_col = anno_df,
+  annotation_row = anno_df,
+  annotation_colors = anno_colors,
+  color = colorRampPalette(c("yellow", "red"))(50),
+  border_color = NA,
+  main = "Sample-to-Sample Pearson Correlation",
+  fontsize = 10
+)
+```
+
+Heatmap of Top Differentially Expressed Genes
+
+```{r}
+
+top_genes <- res_df %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  head(50) %>%
+  pull(gene)
+
+top_genes <-as.numeric(top_genes)
+
+samples_li_unt <- meta %>%
+  filter(Type %in% c("Tumor", "Normal")) %>%
+  pull(Sample)
+
+
+vst_subset <-  vst_mat[top_genes,]
+vst_z <- t(scale(t(vst_subset)))
+
+anno_subset <- meta %>%
+  filter(Sample %in% samples_li_unt) %>%
+  column_to_rownames("Sample") %>%
+  dplyr::select(Type)
+
+sum(is.na(vst_z))
+
+pheatmap(
+  vst_z,
+  annotation_col  = anno_subset,
+  annotation_colors = list(Typr = anno_colors$Type[c("Normal", "Tumor")]),
+  color = colorRampPalette(rev(brewer.pal(11, "RdBu")))(50),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  fontsize_row = 8,
+  border_color = NA,
+  main = "Top 50 DE Genes — Tumor vs. Normal (Z-scored VST)"
+)
+```
+
+MA Plot
+
+```{r}
+
+plotMA(dds,
+  main = "MA plot - Tumor vs Normal Tissue")
+```
+
+
+Volcano Plot
+
+```{r}
+
+ggplot(data = res_df, aes(x = log2FoldChange, y = -log10(padj), col = significance)) +
+  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.5), col = "gray", linetype = 'dashed') +
+  geom_point(size = 1)+
+  scale_color_manual(values = c("#00AFBB","#FFDB6D", "grey" ), 
+                     labels = c("Upregulated", "Downregulated", "Not significant"))+
+   labs(title = "Volcano Plot - Tumor vs Normal",
+     subtitle = "padj < 0.05 and |log2FC| > 1 threshhold shown as dashed lines",
+     x ="log2 Fold Change (Normal/Tumor", 
+     y = "-log10(adjusted p-value)")
+
+
+```
+
+Gene List Preparation
+
+```{r}
+
+sig_up   <- res_df %>% filter(significance == "Up")   %>% pull(gene)
+sig_down <- res_df %>% filter(significance == "Down")  %>% pull(gene)
+sig_all  <- res_df %>% filter(significance != "NS")    %>% pull(gene)
+
+cat("Upregulated:", length(sig_up), "genes\n")
+cat("Downregulated:", length(sig_down), "genes\n")
+cat("Total significant:", length(sig_all), "genes\n")
+```
+
+```{r}
+
+ranked_list <- res_df %>%
+  filter(!is.na(log2FoldChange), !is.na(padj)) %>%
+  arrange(desc(log2FoldChange)) %>%
+  dplyr::select(gene, log2FoldChange)
+
+counts_gene <- tibble::rownames_to_column(counts_gene, "gene")
+
+count_name <- data.frame(gene = counts_gene$gene,
+                   Geneid = counts_gene$Geneid)
+
+
+ranked_list <- merge(ranked_list, count_name, by='gene', all.x=TRUE)
+
+
+
+gene_ranks <- setNames(ranked_list$log2FoldChange, ranked_list$Geneid)
+cat("\nRanked list length:", length(gene_ranks), "\n")
+cat("Range of log2FC:", round(range(gene_ranks), 2), "\n")
+
+
+```
+Converting Gene Symbols to ENTREZ IDs
+
+```{r}
+symbol_to_entrez <- bitr(
+  gsub("\\..*$", "", names(gene_ranks)),
+  fromType = "ENSEMBL",
+  toType   = c("ENTREZID", "SYMBOL"),
+  OrgDb    = org.Hs.eg.db
+)
+
+cat("Mapped", nrow(symbol_to_entrez), "of", length(gene_ranks), "genes to Entrez IDs\n")
+head(counts_gene)
+```
+
+```{r}
+
+
+ranked_entrez <- gene_ranks[symbol_to_entrez$ENSEMBL]
+names(ranked_entrez) <- symbol_to_entrez$ENTREZID
+
+ranked_entrez <- sort(ranked_entrez, decreasing = TRUE)
+ranked_entrez <- ranked_entrez[!duplicated(names(ranked_entrez))]
+
+
+ranked_symbol <- gene_ranks[symbol_to_entrez$ENSEMBL]
+names(ranked_symbol) <- symbol_to_entrez$SYMBOL
+
+ranked_symbol <- sort(ranked_symbol, decreasing = TRUE)
+ranked_symbol <- ranked_symbol[!duplicated(names(ranked_symbol))]
+
+```
+
+Over-Representation Analysis (ORA) — GO
+
+```{r}
+gene_list <- c(ranked_list$log2FoldChange, ranked_list$Geneid)
+
+go_enrich <- enrichGO(gene = gene_list,
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = 'ENSEMBL',
+                      readable = T,
+                      ont = "BP",
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.10)
+
+```
+
+```{r}
+
+barplot(go_enrich, 
+        drop = TRUE, 
+        showCategory = 10, 
+        title = "GO Biological Process - ORA (Tumor vs Normal)",
+        font.size = 8)
+```
+```{r}
+dotplot(go_enrich,
+  title="GO Biological Process - ORA Droplot")
+
+```
+
+ORA — KEGG Pathways
+
+
+```{r}
+kegg_list <- c(ranked_list$log2FoldChange, ranked_list$gene)
+
+kegg_organism = "hsa"
+kk <- enrichKEGG(gene=kegg_list, universe=names(kegg_list),organism=kegg_organism, pvalueCutoff = 0.05, keyType = "ncbi-geneid")
+
+
+dotplot(kk, 
+        showCategory = 10, 
+        title = "KEGG Pathways- ORA (Tumor vs Normal",
+        font.size = 8)
+```
+
+ORA — MSigDB Hallmark Gene Sets
+
+```{r}
+
+hallmark_sets <- msigdbr(species = "Homo sapiens", category = "H") %>%
+  dplyr::select(gs_name, ncbi_gene)
+
+
+msig_ora <- enricher(
+  gene     = res_df$gene,
+  TERM2GENE = hallmark_sets,
+  pvalueCutoff = 0.05
+)
+
+if (nrow(msig_ora@result) > 0) {
+  dotplot(msig_ora,
+          showCategory = 20,
+          title = "MSigDB Hallmark ORA — Normal vs Tumor") +
+    theme(axis.text.y = element_text(size = 10))
+} else {
+  cat("No significant Hallmark terms found at padj < 0.05.\n")
+
+  msig_ora_all <- enricher(gene = sig_all, TERM2GENE = hallmark_sets, pvalueCutoff = 1)
+  dotplot(msig_ora_all, showCategory = 15,
+          title = "MSigDB Hallmark (all terms, unfiltered)") +
+    theme(axis.text.y = element_text(size = 10))
+}
+
+```
+
+Gene Set Enrichment Analysis (GSEA) — GO and GSEA Enrichment Plot
+
+```{r}
+
+gene_list_1 <- ranked_list$log2FoldChange
+names(gene_list_1) <- ranked_list$Geneid
+gene_list_1=sort(gene_list_1, decreasing = TRUE)
+
+
+gse <- gseGO(geneList=gene_list_1, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "none")
+
+gseaplot2(gse, title = "GSEA Enrichment - Top GO Terms", geneSetID = 1)
+```
+
+GSEA Ridgeplot
+
+```{r}
+gse
+ridgeplot(gse)+
+  labs(title = "GSEA GO - Distribution of Log2FC for Top Pathways")
+
+```
+
+GSEA — KEGG
+
+```{r}
+gene_list_2 <- ranked_list$log2FoldChange
+names(gene_list_2) <- ranked_list$gene
+
+gene_list_2=sort(gene_list_2, decreasing = TRUE)
+
+GSEA_KEGG <- gseKEGG(geneList = gene_list_2, 
+                     seed = TRUE)  
+
+
+dotplot(GSEA_KEGG, 
+        showCategory = 10, 
+        title = "GSEA KEGG Pathways - Tumor vs Normal",
+        font.size = 8)
+```
