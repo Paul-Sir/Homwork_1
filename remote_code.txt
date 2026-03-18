@@ -1,0 +1,31 @@
+fastqc *.fastq.gz
+
+trim_galore -j 6 --paired failas1 failas2   #visom meginiu poroms(x6)
+
+
+hisat2 --no-unal --no-discordant -x ref_index -1 failas1_val_1.fq.gz -2 failas2_val_2.fq.gz -output_failas.sam   #visom meginiu poroms(x6)
+
+samtools view -bS output_failas.sam > output.bam   #visiem meginiams(x6)
+
+
+samtools collate -@ 4 -O -u output.bam | samtools fixmate -@ 4 -O -u - - | samtools sort -@ 4 -O -u - | samtools markup -@ 4 - failas_markup.bam    #visiem meginiams(x6)
+
+samtools view -c -f 1024 failas_markup.bam   #visiem meginiams(x6)
+
+samtools flagstat failas_markup.bam   #visiem meginiams(x6)
+
+samtools coverage output.bam    #visiem meginiams(x6)
+
+
+samtools index failas_markup.bam    #visiem meginiams(x6)
+
+multiBamSummary bins --bamfiles *.ba -o out.npz
+
+plotCorrelation -in out.npz -c spearman -p heatmap -o plot.png
+
+plotPCA -n out.npz -o pca.png
+
+
+geneBody_coverage.py -r hg38.HauseKeepingGenes.bed -i failas_1.sorted.bam,failas_2.sorted.bam,failas_3.sorted.bam,failas_4.sorted.bam,failas_5.sorted.bam,failas_6.sorted.bam -o prefix
+
+multiqc . 
